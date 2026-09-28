@@ -169,3 +169,6 @@ Packages/packages-lock.json linguist-generated
 
 # Exceptions for .asset files such as lightning pre-baking
 LightingData.asset     binary
+
+# Unity template icon stays a regular file (public forks cannot receive new LFS objects)
+Assets/TutorialInfo/Icons/URP.png   -filter -diff -merge binary

@@ -19,4 +19,6 @@ public class Controls : MonoBehaviour
     public bool InteractTriggered() => playerInput.actions["Interact"].triggered; //was the interact button just pressed this frame?
     public bool Interact2Held() => playerInput.actions["Interact2"].ReadValue<float>() > 0.9f; //is the interact2 button being held down this frame?
     public bool Interact2Triggered() => playerInput.actions["Interact2"].triggered; //was the interact2 button just pressed this frame?
+    public bool DashTriggered() => playerInput.actions["Dash"].triggered; //was the dash button (Shift) just pressed this frame?
+    public bool GrappleTriggered() => playerInput.actions["Grapple"].triggered; //was the grapple button (Q) just pressed this frame?
 }
