@@ -1,7 +1,7 @@
 using UnityEngine;
 
 //runs after other scripts (like moving platforms) so the player follows them on the same frame
-//the dash and grapple abilities live in PlayerMovement.Dash.cs and PlayerMovement.Grapple.cs
+//the abilities live in their own files: PlayerMovement.Dash.cs, PlayerMovement.Grapple.cs, PlayerMovement.DoubleJump.cs and PlayerMovement.Slide.cs
 [DefaultExecutionOrder(100)]
 public partial class PlayerMovement : MonoBehaviour
 {
@@ -32,6 +32,14 @@ public partial class PlayerMovement : MonoBehaviour
     private bool jumping;
     private bool isGrounded;
     private bool wasGroundedLastFrame;
+    private bool groundUnderCenter; //is there ground right under the middle of the player, or are they only standing on a ledge with the edge of their feet?
+    private float groundDistance; //how far below the player's center the ground they stand on is
+    private static readonly RaycastHit[] groundRayHits = new RaycastHit[8];
+    //where the 8 ground rays around the player start, as (right, forward) offsets from the middle: the 4 sides and the 4 corners
+    private static readonly Vector2[] groundRayOffsets = {
+        new Vector2(.5f, 0f), new Vector2(-.5f, 0f), new Vector2(0f, .5f), new Vector2(0f, -.5f),
+        new Vector2(.35f, .35f), new Vector2(.35f, -.35f), new Vector2(-.35f, .35f), new Vector2(-.35f, -.35f),
+    };
     private Vector3 velocity;
     private Vector3 velocityInput;
     private Vector3 velocityPhysics;
@@ -66,6 +74,12 @@ public partial class PlayerMovement : MonoBehaviour
 
     public bool IsDashing => dashing;
     public bool IsGrappling => grappleState == GrappleState.Attached;
+    public bool IsSliding => sliding;
+
+    /// <summary>
+    /// How much shorter than standing the player is right now (0 unless sliding or crouched under something)
+    /// </summary>
+    public float HeightLost => crouched ? standHeight - controller.height : 0f;
 
     /// <summary>
     /// Called when the player lands on the ground, with how fast they were falling
@@ -73,11 +87,12 @@ public partial class PlayerMovement : MonoBehaviour
     public event System.Action<float> Landed;
 
     /// <summary>
-    /// Throw the player with a velocity (bounce pads, launchers...). Replaces their momentum and cancels dash and grapple
+    /// Throw the player with a velocity (bounce pads, launchers...). Replaces their momentum and cancels dash, slide and grapple
     /// </summary>
     public void Launch(Vector3 launchVelocity)
     {
         CancelDash();
+        EndSlide();
         ReleaseGrapple();
         LeavePlatform(false);
 
@@ -97,8 +112,11 @@ public partial class PlayerMovement : MonoBehaviour
         controller.enabled = true;
 
         CancelDash();
+        CancelSlide();
         ReleaseGrapple(true);
         platform = null; //forget the old platform, or we would get dragged back to it next frame
+        airDashesLeft = airDashesMax;
+        airJumpsLeft = airJumpsMax;
 
         velocity = Vector3.zero;
         velocityInput = Vector3.zero;
@@ -122,6 +140,8 @@ public partial class PlayerMovement : MonoBehaviour
         startRotation = transform.rotation;
 
         airDashesLeft = airDashesMax;
+        airJumpsLeft = airJumpsMax;
+        SetUpSlide();
         SetUpGrapple();
     }
 
@@ -148,9 +168,13 @@ public partial class PlayerMovement : MonoBehaviour
         if (controls.DashTriggered()) {
             TryStartDash();
         }
+        if (controls.SlideTriggered()) {
+            SlidePressed();
+        }
         if (controls.JumpTriggered()) { //if jump button is pressed
             JumpPressed();
         }
+        TryStandUp(); //after sliding under something low, stand back up as soon as there is room
 
         // --velocity logic--
         Vector3 velocityPhysicsStart = velocityPhysics;
@@ -166,13 +190,18 @@ public partial class PlayerMovement : MonoBehaviour
                 UpdateJumpAndGravity(deltaTime);
                 ApplyMomentumDrag(deltaTime);
             }
-            UpdateInputVelocity(deltaTime);
+            if (sliding) { //the slide replaces the normal input movement while it lasts
+                UpdateSlide(deltaTime);
+            }
+            else {
+                UpdateInputVelocity(deltaTime);
+            }
 
             //use the average of the physics velocity at the start and end of the frame, so jumps are the same height at any frame rate
             velocity = velocityInput + (velocityPhysicsStart + velocityPhysics) * .5f;
         }
 
-        controller.Move(velocity * deltaTime); //move the player based on the combined velocity
+        MovePlayer(velocity * deltaTime); //move the player based on the combined velocity
 
         // --after moving--
         RememberPlatform();
@@ -183,6 +212,8 @@ public partial class PlayerMovement : MonoBehaviour
         coyoteTimer -= deltaTime;
         dashCooldownTimer -= deltaTime;
         grappleCooldownTimer -= deltaTime;
+        slideCooldownTimer -= deltaTime;
+        slidePreloadTimer -= deltaTime;
     }
 
     void JumpPressed()
@@ -196,7 +227,7 @@ public partial class PlayerMovement : MonoBehaviour
         else if (coyoteTimer > 0) { //coyote time jump
             BeginJump();
         }
-        else { //if you are not grounded and didn't coyote jump, start the jump preload timer
+        else if (!TryAirJump()) { //double jump, or if there is none left start the jump preload timer
             jumpPreloadTimer = jumpPreloadTimerMax;
         }
     }
@@ -213,7 +244,8 @@ public partial class PlayerMovement : MonoBehaviour
         }
         wasGroundedLastFrame = isGrounded;
         if (isGrounded && velocityPhysics.y <= 0) {
-            velocityPhysics.y = GroundedVelocity;
+            velocityPhysics.y = GroundStickVelocity();
+            StandOnLedge();
         }
     }
 
@@ -240,7 +272,8 @@ public partial class PlayerMovement : MonoBehaviour
     void UpdateInputVelocity(float deltaTime)
     {
         Vector2 moveInput = Vector2.ClampMagnitude(controls.MoveInput(), 1f); //get move input vector and clamp to 1
-        Vector3 targetVelocity = (transform.right * moveInput.x + transform.forward * moveInput.y) * moveSpeed; //the velocity the input asks for
+        float speed = crouched ? moveSpeed * crouchSpeedMultiplier : moveSpeed; //slower while crouched under something low
+        Vector3 targetVelocity = (transform.right * moveInput.x + transform.forward * moveInput.y) * speed; //the velocity the input asks for
 
         //speed up and slow down toward it instead of snapping, with a bit less control in the air
         float acceleration = isGrounded ? groundAcceleration : airAcceleration;
@@ -265,23 +298,38 @@ public partial class PlayerMovement : MonoBehaviour
             velocityPhysics.y = -fallSpeedMax;
         }
         if (isGrounded && velocityPhysics.y < 0) { //if grounded, keep a small downward velocity so the player stays snapped to the ground
-            velocityPhysics.y = GroundedVelocity;
+            velocityPhysics.y = GroundStickVelocity();
         }
     }
 
+    /// <summary>
+    /// The downward velocity that keeps the player snapped to the ground (so they follow slopes and steps down).
+    /// On a ledge with nothing under the middle of the player there is no push down: it would only press the round bottom of the capsule over the edge
+    /// </summary>
+    float GroundStickVelocity()
+    {
+        return groundUnderCenter ? GroundedVelocity : 0f;
+    }
+
     void BeginJump()
+    {
+        BeginJump(jumpStartingVelocity);
+    }
+
+    void BeginJump(float startingVelocity)
     {
         //if you can't jump, don't do anything
         if (!canJump) {
             return;
         }
-        //jumping out of a dash keeps the dash momentum (dash jump)
+        //jumping out of a dash or a slide keeps its momentum (dash jump, slide jump)
         if (dashing) {
             EndDash();
         }
+        EndSlide();
 
         //if jumping, set the physics y velocity to the jump starting velocity, reset timers, and set jumping to true
-        velocityPhysics.y = jumpStartingVelocity;
+        velocityPhysics.y = startingVelocity;
         LeavePlatform(true); //keep the platform's speed so jumping on a moving platform lands you back on it
         jumpHeldTimer = 0;
         coyoteTimer = 0;
@@ -311,9 +359,14 @@ public partial class PlayerMovement : MonoBehaviour
             }
         }
         airDashesLeft = airDashesMax;
+        airJumpsLeft = airJumpsMax;
         //if I just landed on the platform right after pressing the jump button, let me jump
         if (jumpPreloadTimer > 0) {
             BeginJump();
+        }
+        //same for the slide button
+        else if (slidePreloadTimer > 0 && velocityPhysics.y <= 0) {
+            TryStartSlide();
         }
     }
 
@@ -417,49 +470,89 @@ public partial class PlayerMovement : MonoBehaviour
     }
 
     /// <summary>
+    /// Move the player. When falling onto a ledge with only the edge of their feet, land standing on it
+    /// (the round bottom of the capsule would otherwise slip down past the edge and leave the player hanging below the floor)
+    /// </summary>
+    void MovePlayer(Vector3 movement)
+    {
+        if (isGrounded || movement.y >= 0) {
+            controller.Move(movement);
+            return;
+        }
+        //move sideways first, then look for ground under where we ended up and fall no further than that
+        controller.Move(new Vector3(movement.x, 0, movement.z));
+        float standingDistance = StandingDistance();
+        if (FindGround(standingDistance - movement.y, out RaycastHit hit, out bool underCenter) && !underCenter && hit.distance >= standingDistance - controller.stepOffset) {
+            movement.y = -Mathf.Max(hit.distance - standingDistance, 0f);
+        }
+        controller.Move(new Vector3(0, movement.y, 0));
+    }
+
+    /// <summary>
+    /// When standing on a ledge with only the edge of the feet, stand at the height of the ledge (like stepping up onto it)
+    /// </summary>
+    void StandOnLedge()
+    {
+        float lift = StandingDistance() - groundDistance;
+        if (!groundUnderCenter && Mathf.Abs(lift) > .001f) {
+            controller.Move(Vector3.up * lift);
+        }
+    }
+
+    /// <summary>
+    /// How far below the player's center the ground is when they stand on it (the character controller rests its skin width above the ground)
+    /// </summary>
+    float StandingDistance()
+    {
+        return controller.height * .5f - controller.center.y + controller.skinWidth;
+    }
+
+    /// <summary>
     /// Cast raycasts from the middle of the player and from 8 corners to test if the player is on the ground
     /// </summary>
     bool RaycastTouchesGround() {
-        float rayLength = controller.height * .5f + controller.skinWidth + .05f; //reach just past the bottom of the capsule
+        float rayLength = StandingDistance() + .05f; //reach just past the bottom of the capsule
 
-        //test if the middle of the player is touching the ground
-        if (RaycastTest(transform.position, rayLength)) {
-            return true;
+        RaycastHit hit;
+        if (!FindGround(rayLength, out hit, out groundUnderCenter)) {
+            return false;
         }
+        //a ledge that only a corner of the player is over, and that is too high to step onto, is not ground (the player is hanging on its side)
+        if (!groundUnderCenter && hit.distance < StandingDistance() - controller.stepOffset) {
+            return false;
+        }
+        groundDistance = hit.distance;
+        GroundStay(hit);
+        return true;
+    }
 
-        //test if any of the 8 corners of the player is touching the ground
-        float halfWidth = transform.localScale.x * .5f;
-        float diagonalWidth = transform.localScale.x * .35f;
+    /// <summary>
+    /// Cast raycasts from the middle of the player and from 8 corners to look for ground within rayLength below the player's center
+    /// </summary>
+    /// <param name="closestHit">The highest ground found (the middle of the player wins a tie)</param>
+    /// <param name="underCenter">Is there ground right under the middle of the player, so the round bottom of the capsule has something to rest on?</param>
+    bool FindGround(float rayLength, out RaycastHit closestHit, out bool underCenter) {
+        closestHit = default;
+        bool found = false;
 
-        //test the 4 side of the player
-        if (RaycastTest(transform.position + (transform.right * halfWidth), rayLength)) {
-            return true;
-        }
-        if (RaycastTest(transform.position + (-transform.right * halfWidth), rayLength)) {
-            return true;
-        }
-        if (RaycastTest(transform.position + (transform.forward * halfWidth), rayLength)) {
-            return true;
-        }
-        if (RaycastTest(transform.position + (-transform.forward * halfWidth), rayLength)) {
-            return true;
-        }
-        //test the 4 corners of the player
-        if (RaycastTest(transform.position + (transform.right * diagonalWidth) + (transform.forward * diagonalWidth), rayLength)) {
-            return true;
-        }
-        if (RaycastTest(transform.position + (transform.right * diagonalWidth) + (-transform.forward * diagonalWidth), rayLength)) {
-            return true;
-        }
-        if (RaycastTest(transform.position + (-transform.right * diagonalWidth) + (transform.forward * diagonalWidth), rayLength)) {
-            return true;
-        }
-        if (RaycastTest(transform.position + (-transform.right * diagonalWidth) + (-transform.forward * diagonalWidth), rayLength)) {
-            return true;
+        //test the middle of the player. It reaches a step further down, to also find slopes and steps the player is standing on the edge of
+        RaycastHit hit;
+        underCenter = RaycastTest(transform.position, rayLength + controller.stepOffset, out hit);
+        if (underCenter && hit.distance <= rayLength) {
+            closestHit = hit;
+            found = true;
         }
 
-        //if we are not touching the ground, return false
-        return false;
+        //test the 4 sides and the 4 corners of the player
+        float width = transform.localScale.x;
+        foreach (Vector2 offset in groundRayOffsets) {
+            Vector3 startingPoint = transform.position + (transform.right * offset.x + transform.forward * offset.y) * width;
+            if (RaycastTest(startingPoint, rayLength, out hit) && (!found || hit.distance < closestHit.distance)) {
+                closestHit = hit;
+                found = true;
+            }
+        }
+        return found;
     }
 
     /// <summary>
@@ -467,17 +560,22 @@ public partial class PlayerMovement : MonoBehaviour
     /// </summary>
     /// <param name="startingPoint"> Where the ray begins (it will cast down from here)</param>
     /// <param name="rayLength">How long the ray casts</param>
-    bool RaycastTest(Vector3 startingPoint, float rayLength) {
+    /// <param name="closestHit">The closest ground the ray hit</param>
+    bool RaycastTest(Vector3 startingPoint, float rayLength, out RaycastHit closestHit) {
+        closestHit = default;
+        bool found = false;
         //cast a ray down from the starting point and check if it hits the ground
-        RaycastHit hit;
-        if (Physics.Raycast(startingPoint, transform.TransformDirection(Vector3.down), out hit, rayLength, jumpableMask, QueryTriggerInteraction.Ignore)) {
-            //if it hits the ground, call the GroundStay function and return true
-            GroundStay(hit);
-            return true;
+        int hitCount = Physics.RaycastNonAlloc(startingPoint, transform.TransformDirection(Vector3.down), groundRayHits, rayLength, jumpableMask, QueryTriggerInteraction.Ignore);
+        for (int i = 0; i < hitCount; i++) {
+            RaycastHit hit = groundRayHits[i];
+            if (hit.collider.transform.IsChildOf(transform)) { //the player's own colliders are never ground
+                continue;
+            }
+            if (!found || hit.distance < closestHit.distance) {
+                closestHit = hit;
+                found = true;
+            }
         }
-        else {
-            //if it doesn't hit the ground, return false
-            return false;
-        }
+        return found;
     }
 }

@@ -157,8 +157,10 @@ public partial class PlayerMovement
         if (dashing) { //keep the dash's momentum and let the rope take over
             EndDash();
         }
+        EndSlide(); //same for a slide
         jumping = false; //no floaty jump hold while on the rope
-        airDashesLeft = airDashesMax; //grappling gives your air dash back
+        airDashesLeft = airDashesMax; //grappling gives your air dash and double jump back
+        airJumpsLeft = airJumpsMax;
         if (velocityPhysics.y < 0) { //stop falling so the pull kicks in right away
             velocityPhysics.y = 0;
         }

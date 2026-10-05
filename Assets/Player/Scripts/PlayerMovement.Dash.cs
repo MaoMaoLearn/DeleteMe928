@@ -30,6 +30,7 @@ public partial class PlayerMovement
         if (grappleState == GrappleState.Attached) {
             ReleaseGrapple();
         }
+        EndSlide(); //dashing out of a slide ends the slide
 
         //dash the way you are holding, or forward if you aren't holding a direction
         Vector2 moveInput = controls.MoveInput();

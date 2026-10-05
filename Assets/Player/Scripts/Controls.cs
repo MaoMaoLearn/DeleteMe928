@@ -21,4 +21,5 @@ public class Controls : MonoBehaviour
     public bool Interact2Triggered() => playerInput.actions["Interact2"].triggered; //was the interact2 button just pressed this frame?
     public bool DashTriggered() => playerInput.actions["Dash"].triggered; //was the dash button (Shift) just pressed this frame?
     public bool GrappleTriggered() => playerInput.actions["Grapple"].triggered; //was the grapple button (Q) just pressed this frame?
+    public bool SlideTriggered() => playerInput.actions["Crouch"].triggered; //was the slide button (C) just pressed this frame?
 }

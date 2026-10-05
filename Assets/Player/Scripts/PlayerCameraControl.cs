@@ -15,6 +15,8 @@ public class PlayerCameraControl : MonoBehaviour
     [SerializeField] private float landingDipPerSpeed = .02f; //how far the camera dips per unit of landing speed
     [SerializeField] private float landingDipMax = .3f;
     [SerializeField] private float landingDipMinSpeed = 5f; //softer landings don't dip the camera
+    [SerializeField] private float crouchCameraDrop = .5f; //how far the camera lowers for each unit the player gets shorter (sliding)
+    [SerializeField] private float crouchCameraSmoothing = 12f; //how fast the camera lowers and comes back up
 
     private const float DipSpringStrength = 15f; //how fast the camera springs back up after a landing dip
 
@@ -28,6 +30,7 @@ public class PlayerCameraControl : MonoBehaviour
     private Vector3 cameraHolderStartPosition;
     private float dipOffset;
     private float dipVelocity;
+    private float crouchOffset;
 
     void Start()
     {
@@ -83,7 +86,12 @@ public class PlayerCameraControl : MonoBehaviour
         //spring the landing dip back to zero (critically damped, so it settles without bouncing)
         dipVelocity += (-dipOffset * DipSpringStrength * DipSpringStrength - dipVelocity * 2f * DipSpringStrength) * Time.deltaTime;
         dipOffset += dipVelocity * Time.deltaTime;
-        cameraHolder.localPosition = cameraHolderStartPosition + Vector3.up * dipOffset;
+
+        //lower the camera while the player is short (sliding or crouched under something)
+        float targetCrouchOffset = -movement.HeightLost * crouchCameraDrop;
+        crouchOffset = Mathf.Lerp(crouchOffset, targetCrouchOffset, 1f - Mathf.Exp(-crouchCameraSmoothing * Time.deltaTime));
+
+        cameraHolder.localPosition = cameraHolderStartPosition + Vector3.up * (dipOffset + crouchOffset);
     }
 
     /// <summary>
